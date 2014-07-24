@@ -4,6 +4,7 @@ import copy
 import hashlib
 from collections import deque
 import time
+import cProfile
 
 
 
@@ -67,31 +68,43 @@ def card_name(c):
 # _down[0][0] _down[1][0] ... _down[3][0] _down[4][0] ... _down[9][0] (top)
 #   _up[0][0]   _up[1][0] ...   _up[3][0]   _up[4][0] ...   _up[9][0]
 #   _up[0][1]   _up[1][1] ...   _up[3][1]   _up[4][1] ...   _up[9][1] (top)
+#
+# _moves is the list of moves that gets a game into its state. It is append-
+# only; nothing is ever inserted or deleted. It can get very long (thousands),
+# such that copying games becomes a memory issue. As a memory optimization,
+# it is stored as a list of lists, i.e. moves are appended to the last list
+# in _moves, and when it gets to a certain length, a new list is added to
+# _moves and it is filled. That makes it so a shallow copy of _moves is
+# almost sufficient when copying games - the lists in _moves that are full
+# can be simply referred to, but the last list that is still receiving moves
+# must be actually copied.
+#
 class SpiderGame():
     """One game of spider solitaire"""
 
-    def __init__(self, cards):
+    def __init__(self, cards=None):
         # Initial state
-        self._moves = []
+        self._moves = [[]]
+        self._moves_max = 100
         self._done = []
         self._down = [[], [], [], [], [], [], [], [], [], []]
         self._up = [[], [], [], [], [], [], [], [], [], []]
         self._pile = []
         self._next = (0, 0) # next move to consider: (src, dst)
-        # deal 4 to each of ten down stacks
-        for i in range(4):
-            for s in self._down:
-                s.insert(0, cards.pop())
-        # deal 1 more to first four down stacks
-        for i in range(4):
-            self._down[i].insert(0, cards.pop())
-        # 1 card to each up stack
-        for s in self._up:
-            s.append(cards.pop())
-        # pile has remaining cards (50)
-        for s in range(50):
-            self._pile.append(cards.pop())
-        self._invariant()
+        if not cards is None:
+            # deal 4 to each of ten down stacks
+            for i in range(4):
+                for s in self._down:
+                    s.insert(0, cards.pop())
+            # deal 1 more to first four down stacks
+            for i in range(4):
+                self._down[i].insert(0, cards.pop())
+            # 1 card to each up stack
+            for s in self._up:
+                s.append(cards.pop())
+            # pile has remaining cards (50)
+            for s in range(50):
+                self._pile.append(cards.pop())
 
     def _invariant(self):
         """Check that current game structure is consistent"""
@@ -112,6 +125,28 @@ class SpiderGame():
         count = count + len(self._pile)
         assert count == 104             # always 104 cards total in the game
 
+    def copy(self):
+        c = SpiderGame()
+        # done stacks: the stacks are immutable (once they are done),
+        # but the list of stacks is not
+        for s in self._done:
+            c._done.append(s)
+        # down, up, pile stacks: stacks are mutable, cards are immutable
+        c._down = []
+        for s in self._down:
+            c._down.append(copy.copy(s))
+        c._up = []
+        for s in self._up:
+            c._up.append(copy.copy(s))
+        c._pile = copy.copy(self._pile)
+        # next move: copy the tuple
+        c._next = copy.copy(self._next)
+        # moves: copy the top-level list and the last list it contains
+        # all lists in _moves except the last are immutable
+        c._moves = copy.copy(self._moves)
+        c._moves[-1] = copy.copy(self._moves[-1])
+        return c
+
     def deal_from_pile(self):
         """Deal from pile to up cards"""
         self._invariant()
@@ -120,7 +155,9 @@ class SpiderGame():
         for s in self._up:
             s.append(self._pile.pop(0))
         self._next = (0, 0)
-        self._moves.append('Deal')
+        self._moves[-1].append('Deal')
+        if len(self._moves[-1]) == self._moves_max:
+            self._moves.append([])
         self._invariant()
         return True
 
@@ -133,16 +170,19 @@ class SpiderGame():
         for s in self._down:
             h.update('*')
             for c in s:
-                h.update(card_name(c))
+                h.update(str(c[0]))
+                h.update(c[1])
         # up cards
         for s in self._up:
             h.update('*')
             for c in s:
-                h.update(card_name(c))
+                h.update(str(c[0]))
+                h.update(c[1])
         # pile
         h.update('*')
         for c in self._pile:
-            h.update(card_name(c))
+            h.update(str(c[0]))
+            h.update(c[1])
         return h.hexdigest()
 
     def print_game(self):
@@ -213,7 +253,9 @@ class SpiderGame():
         """Move cards (internal function)"""
         self._up[dst].extend(self._up[src][-numCards:])
         self._up[src][-numCards:] = []
-        self._moves.append((src, dst))
+        self._moves[-1].append((src, dst))
+        if len(self._moves[-1]) == self._moves_max:
+            self._moves.append([])
         self._next = (0, 0)
         # see if we need to flip a down card
         if len(self._up[src]) == 0:
@@ -295,6 +337,7 @@ class Spider4():
         for h in range(256):
             self._hashes.append([])
         self._games.append(game)
+        self.total_hashes = 0
         self._hash_add(game.get_hash())
         self.won = 0
         self.lost = 0
@@ -303,6 +346,7 @@ class Spider4():
     def _hash_add(self, h):
         i = int(h[:2], 16)
         self._hashes[i].append(h)
+        self.total_hashes = self.total_hashes + 1
 
     def _hash_find(self, h):
         i = int(h[:2], 16)
@@ -312,7 +356,10 @@ class Spider4():
             return False
 
     def play(self):
-        stat_some = 1000
+        pr = cProfile.Profile()
+        pr.enable()
+        stat_interval = 10000
+        stat_some = stat_interval
         stat_some_time = time.time()
         while len(self._games) > 0:
             # continue next game in queue
@@ -322,8 +369,11 @@ class Spider4():
                 stat_some = stat_some - 1
                 if stat_some == 0:
                     print '{0:0.1f}: {1} won, {2} lost, {3} in progress'.format(time.time() - stat_some_time, self.won, self.lost, len(self._games))
-                    stat_some = 1000
+                    stat_some = stat_interval
                     stat_some_time = time.time()
+                    #pr.print_stats()
+                    pr = cProfile.Profile()
+                    pr.enable()
             game = self._games.pop()
             if show & show_move_game:
                 print 'RESUME'
@@ -338,7 +388,7 @@ class Spider4():
                 if src < 10:
                     if game.move(False):
                         # game without taking this move goes on the to-do list
-                        game2 = copy.deepcopy(game)
+                        game2 = game.copy() # copy.deepcopy(game)
                         game2.next_move()
                         self._games.append(game2)
                         # continue playing the game where we take the move
@@ -389,21 +439,39 @@ class Spider4():
 #g.play()
 #pass
 
+# game that is known winnable
 cards = [
-    (10, 'S'),  (2, 'C'),  (0, 'X'),  (8, 'H'),  (9, 'D'),  (0, 'X'),  (8, 'D'),  (9, 'C'), (11, 'H'), (10, 'H'),
-    (11, 'D'), (13, 'C'),  (0, 'X'),  (7, 'S'), (10, 'D'),  (0, 'X'),  (8, 'C'),  (2, 'S'),  (7, 'D'),  (8, 'S'),
-    (10, 'H'),  (6, 'S'), (13, 'D'),  (5, 'C'),  (7, 'C'), (13, 'D'),  (5, 'H'), (13, 'S'), (13, 'H'), (11, 'C'),
-     (2, 'C'), (13, 'S'),  (4, 'C'),  (1, 'C'),  (3, 'H'), (12, 'H'),  (2, 'D'),  (5, 'C'),  (2, 'H'), (11, 'D'),
-     (9, 'H'),  (6, 'C'),  (4, 'S'),  (3, 'C'),
+     (9, 'S'), (12, 'D'),  (1, 'S'),  (7, 'H'),  (9, 'D'),  (4, 'H'),  (9, 'C'),  (5, 'D'),  (6, 'C'), (11, 'C'),
+    (12, 'S'),  (6, 'S'),  (4, 'C'),  (7, 'C'), (11, 'H'),  (6, 'D'),  (7, 'S'),  (9, 'D'),  (9, 'C'),  (4, 'D'),
+     (3, 'C'), (10, 'C'),  (5, 'H'),  (3, 'S'),  (5, 'C'),  (2, 'S'), (10, 'H'),  (3, 'D'), (10, 'H'),  (2, 'S'),
+     (3, 'S'), (13, 'H'),  (2, 'D'),  (7, 'H'), (10, 'C'), (13, 'D'),  (8, 'S'), (12, 'H'),  (2, 'D'), (11, 'D'),
+    (13, 'H'), (11, 'S'),  (5, 'D'), (13, 'D'),
 
-     (6, 'H'), (10, 'D'),  (6, 'D'), (12, 'H'), (13, 'H'),  (6, 'S'), (12, 'C'),  (5, 'S'),  (5, 'S'),  (6, 'H'),
+    (12, 'H'),  (6, 'H'),  (4, 'C'),  (2, 'C'), (10, 'D'),  (8, 'S'),  (8, 'D'), (13, 'S'),  (6, 'H'), (13, 'C'),
 
-     (4, 'D'), (12, 'S'), (13, 'C'), (12, 'D'),  (2, 'S'),  (4, 'H'),  (4, 'D'),  (8, 'D'),  (2, 'H'),  (4, 'S'),
-     (1, 'S'),  (7, 'H'), (11, 'S'),  (8, 'S'),  (3, 'H'),  (5, 'D'),  (3, 'D'), (12, 'D'),  (9, 'S'),  (5, 'H'),
-     (9, 'D'),  (9, 'H'),  (1, 'C'),  (5, 'D'), (11, 'H'),  (1, 'S'),  (7, 'D'),  (1, 'D'),  (6, 'C'),  (1, 'H'),
-    (12, 'S'),  (8, 'H'),  (9, 'C'),  (2, 'D'),  (4, 'C'),  (3, 'C'),  (1, 'D'),  (9, 'S'), (10, 'C'), (10, 'S'),
-     (6, 'D'),  (3, 'S'),  (3, 'S'),  (4, 'H'), (10, 'C'),  (8, 'C'), (12, 'C'), (11, 'C'),  (3, 'D'),  (7, 'S')
+     (1, 'C'),  (5, 'H'),  (8, 'H'),  (4, 'S'),  (7, 'C'),  (1, 'C'),  (2, 'H'),  (5, 'C'), (10, 'S'),  (1, 'H'),
+     (7, 'D'),  (3, 'H'),  (8, 'C'),  (5, 'S'), (11, 'H'),  (6, 'D'),  (4, 'H'),  (2, 'H'), (11, 'S'), (12, 'S'),
+     (7, 'S'),  (3, 'C'),  (6, 'S'),  (8, 'C'),  (8, 'H'),  (9, 'H'),  (8, 'D'),  (1, 'D'), (13, 'C'),  (6, 'C'),
+     (3, 'H'), (12, 'C'),  (5, 'S'),  (3, 'D'),  (9, 'H'), (10, 'D'), (10, 'S'), (12, 'C'),  (4, 'D'), (11, 'D'),
+     (7, 'D'),  (9, 'S'),  (1, 'H'),  (4, 'S'), (12, 'D'),  (2, 'C'), (13, 'S'),  (1, 'S'), (11, 'C'),  (1, 'D'),
     ]
+
+# winnability unknown
+# cards = [
+#     (10, 'S'),  (2, 'C'),  (0, 'X'),  (8, 'H'),  (9, 'D'),  (0, 'X'),  (8, 'D'),  (9, 'C'), (11, 'H'), (10, 'H'),
+#     (11, 'D'), (13, 'C'),  (0, 'X'),  (7, 'S'), (10, 'D'),  (0, 'X'),  (8, 'C'),  (2, 'S'),  (7, 'D'),  (8, 'S'),
+#     (10, 'H'),  (6, 'S'), (13, 'D'),  (5, 'C'),  (7, 'C'), (13, 'D'),  (5, 'H'), (13, 'S'), (13, 'H'), (11, 'C'),
+#      (2, 'C'), (13, 'S'),  (4, 'C'),  (1, 'C'),  (3, 'H'), (12, 'H'),  (2, 'D'),  (5, 'C'),  (2, 'H'), (11, 'D'),
+#      (9, 'H'),  (6, 'C'),  (4, 'S'),  (3, 'C'),
+# 
+#      (6, 'H'), (10, 'D'),  (6, 'D'), (12, 'H'), (13, 'H'),  (6, 'S'), (12, 'C'),  (5, 'S'),  (5, 'S'),  (6, 'H'),
+# 
+#      (4, 'D'), (12, 'S'), (13, 'C'), (12, 'D'),  (2, 'S'),  (4, 'H'),  (4, 'D'),  (8, 'D'),  (2, 'H'),  (4, 'S'),
+#      (1, 'S'),  (7, 'H'), (11, 'S'),  (8, 'S'),  (3, 'H'),  (5, 'D'),  (3, 'D'), (12, 'D'),  (9, 'S'),  (5, 'H'),
+#      (9, 'D'),  (9, 'H'),  (1, 'C'),  (5, 'D'), (11, 'H'),  (1, 'S'),  (7, 'D'),  (1, 'D'),  (6, 'C'),  (1, 'H'),
+#     (12, 'S'),  (8, 'H'),  (9, 'C'),  (2, 'D'),  (4, 'C'),  (3, 'C'),  (1, 'D'),  (9, 'S'), (10, 'C'), (10, 'S'),
+#      (6, 'D'),  (3, 'S'),  (3, 'S'),  (4, 'H'), (10, 'C'),  (8, 'C'), (12, 'C'), (11, 'C'),  (3, 'D'),  (7, 'S')
+#     ]
 cards.reverse()
 s = SpiderGame(cards)
 s.print_game()

@@ -3,8 +3,8 @@ import random
 import string
 import copy
 import hashlib
+from collections import deque
 
-sys.setrecursionlimit(10000)
 
 verbosity = 2
 
@@ -247,56 +247,64 @@ class Spider4():
                 # next tail is not a valid move
                 return False
 
-    def play(self):
-        self.invariant()
-        self._nest = self._nest + 1
-        if verbosity >= 1:
-            print self._nest,
-        while True:
-            for c1 in range(10):
-                for c2 in range(10):
-                    if c1 == c2:
-                        continue
-                    if self.move(c1, c2, False):
-                        if verbosity >= 2:
-                            print 'Can move from', c1, 'to', c2
-                        # play one game where we move, and one where we don't
-                        new_self = copy.deepcopy(self)
-                        new_self.move(c1, c2, True)
-                        new_self._moves.append((c1, c2))
-                        # Now self is the game without the move, and new_self is
-                        # the game with the move. The self game will continue with
-                        # this loop, and we interject the new_self here.
-                        # print 'Old:'
-                        # self.print_table()
-                        # only play new_self if we have not already found and played it
-                        h = new_self.get_hash()
-                        if not h in Spider4._seen:
-                            Spider4._seen.append(h)
-                            if verbosity >= 2:
-                                print 'New:'
-                                new_self.print_table()
-                            new_self.play()
-                        else:
-                            if verbosity >= 2:
-                                print 'Seen it...'
-            # out of moves; deal
-            if not self.deal_one():
-                # no cards in pile; we lose
-                break
-            if verbosity >= 2:
-                print 'Deal:'
-                self.print_table()
-        print 'lost after', len(self._moves), 'moves'
-        self._nest = self._nest - 1
-        if verbosity >= 1:
-            print self._nest
+
+
+class SpiderGame():
+
+    def __init__(self):
+        self._games = deque([])
+        self._hashes = []
+
+    def play(self, game):
+        self._games.append(game)
+        self._hashes.append(game.get_hash())
+        while len(self._games) > 0:
+            # continue game at tail of stack
+            print len(self._games), 'games queued'
+            game = self._games.popleft()
+            #print 'Resuming game'
+            #game.print_table()
+            pass
+            while True:
+                for src in range(10):
+                    for dst in range(10):
+                        if dst == src:
+                            continue
+                        if game.move(src, dst, False):
+                            # Move from src to dst is possible. Fork here.
+                            # One game is taking the move, one game is not taking
+                            # the move. The game where we take the move is
+                            # pushed on the game stack. The game where we do not take the
+                            # move is continued in this loop. We save the one where
+                            # the move is taken because then games on the game stack
+                            # always start fresh at src=dst=0.
+                            # Take move and save game
+                            new_game = copy.deepcopy(game)
+                            new_game.move(src, dst, True)
+                            h = new_game.get_hash()
+                            if not h in self._hashes:
+                                self._games.append(new_game)
+                                self._hashes.append(h)
+                        # end if game.move()
+                    # end for dst
+                # end for src
+                # out of moves - deal
+                if not game.deal_one():
+                    # out of cards - lose
+                    break
+                else:
+                    pass
+                    #print 'DEAL'
+                    #game.print_table()
+            # end while True
+            print 'LOSE'
+        # end while len()
+        pass
 
 
 
 random.seed(0)
 s = Spider4()
-s.print_table()
-print s.get_hash()
-s.play()
+g = SpiderGame()
+g.play(s)
 pass
